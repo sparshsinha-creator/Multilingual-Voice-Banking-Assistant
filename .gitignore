@@ -1,0 +1,11 @@
+venv/
+voicefintech-env/
+__pycache__/
+*.pyc
+.env
+*.wav
+*.mp3
+phase3_rag/index/
+
+phase7_landing_page/node_modules/
+phase7_landing_page/dist/
