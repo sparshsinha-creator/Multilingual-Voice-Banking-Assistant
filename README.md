@@ -181,6 +181,20 @@ This is a demo, not a production system. Deliberately out of scope:
   in a single turn; it does not do multi-turn slot-filling (asking follow-up
   questions if age or bank-account status is missing).
 
+## Known limitations
+
+- **Code-switched proper nouns can get mangled.** When an English proper
+  noun (e.g. "Reserve Bank of India") is spoken inside an otherwise Hindi/
+  Kannada/Tamil sentence, Whisper sometimes phonetically transliterates it
+  into that language's script instead of keeping it in Latin script, and
+  the translation step then translates that phonetic spelling literally
+  instead of recognizing the original English term. This is a known
+  limitation of combining Whisper with dictionary-style machine
+  translation on mixed-language (code-switched) speech, not a pipeline
+  bug — retrieval and the agent still behave correctly (they either match
+  real content or honestly say they don't have it) given whatever text
+  they're handed.
+
 ## Data accuracy disclaimer
 
 The FAQ dataset (`data/fintech_schemes_faq.json`) and the Atal Pension

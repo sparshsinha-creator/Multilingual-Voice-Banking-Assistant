@@ -6,9 +6,10 @@ Hindi, Kannada, Tamil, and English instead of English only. On top of
 Phase 1, this phase adds:
   - Auto language detection: Whisper is no longer forced to language="en",
     so it detects the spoken language itself (plus a confidence score).
-  - Translation to English via deep-translator's GoogleTranslator, since
+  - Translation to English via deep-translator's MyMemoryTranslator, since
     English is the internal processing language later phases (RAG/agent
-    logic) will operate on.
+    logic) will operate on. Long text is chunked under MyMemory's 500-char
+    request limit and translated piece by piece.
   - Translation back from English into the detected language before
     speaking the reply, with a small map from Whisper's language codes to
     the gTTS language codes needed for playback.
@@ -21,6 +22,7 @@ Run with: python phase2_multilingual/main.py
 """
 
 import os
+import re
 import sys
 import tempfile
 
@@ -30,7 +32,7 @@ import speech_recognition as sr
 # Devanagari/Kannada/Tamil script; force UTF-8 so printing transcripts
 # doesn't crash.
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-from deep_translator import GoogleTranslator
+from deep_translator import MyMemoryTranslator
 from faster_whisper import WhisperModel
 from gtts import gTTS
 
@@ -44,6 +46,56 @@ GTTS_LANGUAGE_MAP = {
     "kn": "kn",
     "ta": "ta",
 }
+
+# Whisper language code -> MyMemoryTranslator locale code. GoogleTranslator's
+# free scraper backend became unreliable (frequently returns "No translation
+# was found"), so translation runs on MyMemory instead, which needs full
+# locale codes rather than Whisper's bare ISO codes.
+MYMEMORY_LANGUAGE_MAP = {
+    "en": "en-GB",
+    "hi": "hi-IN",
+    "kn": "kn-IN",
+    "ta": "ta-IN",
+}
+
+# MyMemory's free tier rejects any single request over 500 characters, but
+# RAG answers routinely run well past that -- so long text is split into
+# chunks under this limit (leaving headroom) and translated piece by piece.
+MYMEMORY_MAX_CHARS = 450
+
+
+def _split_into_chunks(text: str, max_chars: int = MYMEMORY_MAX_CHARS) -> list[str]:
+    """Split text into <= max_chars pieces, breaking on sentence boundaries
+    where possible so translation isn't cut off mid-sentence."""
+    sentences = re.split(r"(?<=[.!?।])\s+", text)
+    chunks = []
+    current = ""
+    for sentence in sentences:
+        # A single sentence longer than the limit still needs a hard split.
+        while len(sentence) > max_chars:
+            head, sentence = sentence[:max_chars], sentence[max_chars:]
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.append(head)
+        candidate = f"{current} {sentence}".strip() if current else sentence
+        if len(candidate) > max_chars:
+            chunks.append(current)
+            current = sentence
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _translate(text: str, source_locale: str, target_locale: str) -> str:
+    """Translate text via MyMemory, chunking first if it exceeds the API's
+    500-character request limit."""
+    if len(text) <= MYMEMORY_MAX_CHARS:
+        return MyMemoryTranslator(source=source_locale, target=target_locale).translate(text)
+    translator = MyMemoryTranslator(source=source_locale, target=target_locale)
+    return " ".join(translator.translate(chunk) for chunk in _split_into_chunks(text))
 
 
 def record_audio() -> str:
@@ -67,17 +119,29 @@ def transcribe_auto(wav_path: str, model: WhisperModel) -> tuple[str, str, float
 
     Returns (text, detected_language, language_probability).
     """
-    segments, info = model.transcribe(wav_path)
-    text = " ".join(segment.text.strip() for segment in segments).strip()
-    return text, info.language, info.language_probability
+    # Without VAD, Whisper hallucinates text (e.g. "you", stray foreign-script
+    # fragments) over silence/background noise instead of returning nothing --
+    # vad_filter drops non-speech segments before transcription runs on them.
+    try:
+        segments, info = model.transcribe(wav_path, vad_filter=True)
+        text = " ".join(segment.text.strip() for segment in segments).strip()
+        return text, info.language, info.language_probability
+    except ValueError:
+        # VAD found no speech at all, leaving nothing for language detection
+        # to run on -- treat that the same as an empty transcript.
+        return "", "en", 0.0
 
 
 def to_english(text: str, source_language: str) -> str:
     """Translate text into English using deep-translator, unless it's already English."""
     if source_language == "en":
         return text
+    source_locale = MYMEMORY_LANGUAGE_MAP.get(source_language)
+    if source_locale is None:
+        print(f"Unrecognized source language '{source_language}'. Using original text instead.")
+        return text
     try:
-        return GoogleTranslator(source=source_language, target="en").translate(text)
+        return _translate(text, source_locale, "en-GB")
     except Exception as e:
         print(f"Translation to English failed ({e}). Using original text instead.")
         return text
@@ -87,8 +151,12 @@ def from_english(text: str, target_language: str) -> str:
     """Translate English text into the target language using deep-translator."""
     if target_language == "en":
         return text
+    target_locale = MYMEMORY_LANGUAGE_MAP.get(target_language)
+    if target_locale is None:
+        print(f"Unrecognized target language '{target_language}'. Reply will stay in English.")
+        return text
     try:
-        return GoogleTranslator(source="en", target=target_language).translate(text)
+        return _translate(text, "en-GB", target_locale)
     except Exception as e:
         print(f"Translation to '{target_language}' failed ({e}). Reply will stay in English.")
         return text
