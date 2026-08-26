@@ -162,14 +162,20 @@ def from_english(text: str, target_language: str) -> str:
         return text
 
 
-def speak(text: str, language_code: str) -> None:
-    """Speak text aloud with gTTS in the given language, falling back to printing the file path."""
+def synthesize_speech(text: str, language_code: str) -> str:
+    """Generate speech for text via gTTS and return the saved mp3's path,
+    without playing or deleting it -- for callers (like a UI) that need to
+    hand the audio off elsewhere instead of playing it on this machine."""
     gtts_lang = GTTS_LANGUAGE_MAP.get(language_code, "en")
-
     fd, mp3_path = tempfile.mkstemp(suffix=".mp3")
     os.close(fd)
     gTTS(text=text, lang=gtts_lang).save(mp3_path)
+    return mp3_path
 
+
+def speak(text: str, language_code: str) -> None:
+    """Speak text aloud with gTTS in the given language, falling back to printing the file path."""
+    mp3_path = synthesize_speech(text, language_code)
     try:
         from playsound import playsound
 
